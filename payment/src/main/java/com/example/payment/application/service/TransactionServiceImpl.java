@@ -66,7 +66,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
         try {
             Transaction transaction = mapper.toDomain(request);
-            transaction.setExpiryTime(LocalDateTime.now().plusMinutes(1));
+            transaction.setExpiryTime(LocalDateTime.now().plusMinutes(15));
 
             Transaction result = gateway.execute(transaction);
             Transaction saved = transactionRepository.save(result);
@@ -141,8 +141,11 @@ public class TransactionServiceImpl implements PaymentUseCase {
     @Scheduled(fixedRate = 60000)
     @Transactional
     public void processExpiredTransactions() {
+        log.info("Running expired transactions check at {}", LocalDateTime.now());
         List<Transaction> expiredTransactions = transactionRepository
                 .findByStatusAndExpiryTimeBefore("PENDING", LocalDateTime.now());
+
+        log.info("Found {} expired transactions", expiredTransactions.size());
 
         if (!expiredTransactions.isEmpty()) {
             expiredTransactions.forEach(transaction -> {
@@ -150,7 +153,8 @@ public class TransactionServiceImpl implements PaymentUseCase {
                         transaction.getOrderId(), transaction.getExpiryTime());
                 transaction.setStatus("EXPIRED");
             });
-            transactionRepository.saveAll(expiredTransactions);
+            List<Transaction> saved = transactionRepository.saveAll(expiredTransactions);
+            log.info("Successfully updated {} transactions to EXPIRED", saved.size());
         }
     }
 
@@ -218,19 +222,5 @@ public class TransactionServiceImpl implements PaymentUseCase {
                 .build();
     }
 
-    private String hmacSHA512(String key, String data) throws Exception {
-        Mac hmac = Mac.getInstance("HmacSHA512");
-        hmac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA512"));
-        byte[] hashBytes = hmac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-        StringBuilder hexString = new StringBuilder();
-        for (byte b : hashBytes) {
-            hexString.append(String.format("%02x", b));
-        }
-        return hexString.toString();
-    }
 
-    private String maskSecretKey(String key) {
-        if (key == null || key.length() < 8) return "****";
-        return key.substring(0, 2) + "****" + key.substring(key.length() - 2);
-    }
 }
