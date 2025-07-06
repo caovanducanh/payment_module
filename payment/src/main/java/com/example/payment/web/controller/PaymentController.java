@@ -18,13 +18,8 @@ import java.util.Map;
 public class PaymentController {
 
     private final PaymentUseCase paymentService;
-    @Autowired
-    private VnPayApiClient vnPayApiClient;
 
-    @GetMapping("/test-hash")
-    public void testHash() throws Exception {
-        vnPayApiClient.testHashGeneration();
-    }
+
     @PostMapping
     public ResponseEntity<ResponseObject> createPayment(@RequestBody PaymentRequest request) {
         return ResponseEntity.ok(paymentService.handle(request));

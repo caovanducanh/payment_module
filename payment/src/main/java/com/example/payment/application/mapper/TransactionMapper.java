@@ -6,6 +6,9 @@ import com.example.payment.web.dto.request.PaymentRequest;
 import com.example.payment.web.dto.response.PaymentResponse;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
+import java.util.stream.Collectors;
+
 @Component
 public class TransactionMapper {
 
@@ -53,5 +56,17 @@ public class TransactionMapper {
         response.setTransactionId(transaction.getTransactionId());
         response.setRedirectUrl(transaction.getRedirectUrl());
         return response;
+    }
+    public List<TransactionEntity> toEntities(Iterable<Transaction> domains) {
+        return ((List<Transaction>) domains).stream()
+                .map(this::toEntity)
+                .collect(Collectors.toList());
+    }
+
+    // Thêm phương thức mới để chuyển đổi danh sách
+    public List<Transaction> toDomains(List<TransactionEntity> entities) {
+        return entities.stream()
+                .map(this::toDomain)
+                .collect(Collectors.toList());
     }
 }

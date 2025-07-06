@@ -12,17 +12,18 @@ import com.example.payment.web.dto.response.ResponseObject;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -49,6 +50,14 @@ public class TransactionServiceImpl implements PaymentUseCase {
     @Override
     @Transactional
     public ResponseObject handle(PaymentRequest request) {
+        transactionRepository.findByOrderId(request.getOrderId())
+                .ifPresent(existing -> {
+                    if (!"PENDING".equals(existing.getStatus())) {
+                        throw new IllegalStateException("Transaction with orderId " + request.getOrderId() +
+                                " already exists with status " + existing.getStatus());
+                    }
+                });
+
         TransactionGateway gateway = gatewayMap.get(request.getProvider());
         if (gateway == null) {
             return buildErrorResponse("Unsupported provider: " + request.getProvider(),
@@ -57,19 +66,15 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
         try {
             Transaction transaction = mapper.toDomain(request);
+            transaction.setExpiryTime(LocalDateTime.now().plusMinutes(1));
+
             Transaction result = gateway.execute(transaction);
-
-            log.info("Saving transaction with orderId: {}", transaction.getOrderId());
             Transaction saved = transactionRepository.save(result);
-            log.info("Saved transaction: {}", saved.getOrderId());
-
             eventPublisher.publishEvent(new TransactionCompletedEvent(saved));
-            PaymentResponse response = mapper.toResponse(saved);
 
-            return buildSuccessResponse("Payment URL created successfully", response);
+            return buildSuccessResponse("Payment URL created successfully", mapper.toResponse(saved));
 
         } catch (Exception e) {
-            log.error("Failed to generate payment URL", e);
             return buildErrorResponse("Failed to generate payment URL: " + e.getMessage(),
                     HttpStatus.INTERNAL_SERVER_ERROR, null);
         }
@@ -89,150 +94,64 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
     @Transactional
     public ResponseObject handleVNPayCallback(Map<String, String> params, boolean isIPN) {
-        final String prefix = isIPN ? "IPN: " : "";
         final String[] REQUIRED_PARAMS = {"vnp_SecureHash", "vnp_TxnRef", "vnp_ResponseCode"};
 
-        // 1. Validate required parameters
         for (String param : REQUIRED_PARAMS) {
             if (!params.containsKey(param)) {
-                log.error("{}Missing required parameter: {}", prefix, param);
-                return buildErrorResponse(prefix + "Missing required parameter: " + param,
+                return buildErrorResponse("Missing required parameter: " + param,
                         HttpStatus.BAD_REQUEST, Map.of("RspCode", "96"));
             }
         }
 
-        String secureHash = params.get("vnp_SecureHash");
         String orderId = params.get("vnp_TxnRef");
         String responseCode = params.get("vnp_ResponseCode");
-        String transactionId = params.get("vnp_TransactionNo");
 
         try {
-            // 2. Prepare parameters - giữ nguyên case của key như VNPay gửi về
-            Map<String, String> filteredParams = new LinkedHashMap<>();
-            params.forEach((key, value) -> {
-                if (key.startsWith("vnp_") &&
-                        !key.equalsIgnoreCase("vnp_SecureHash") &&
-                        !key.equalsIgnoreCase("vnp_SecureHashType")) {
-                    filteredParams.put(key, value);
-                }
-            });
+            Transaction transaction = transactionRepository.findByOrderId(orderId)
+                    .orElseThrow(() -> new RuntimeException("Transaction not found"));
 
-            // 3. Sort parameters exactly like VNPay does
-            Map<String, String> sortedParams = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            sortedParams.putAll(filteredParams);
-
-            // 4. Build sign data - không encode giá trị
-            StringBuilder signData = new StringBuilder();
-            sortedParams.forEach((key, value) -> {
-                if (signData.length() > 0) signData.append("&");
-                signData.append(key).append("=").append(value);
-            });
-
-            // 5. Generate hash với secret key CHÍNH XÁC
-            String calculatedHash = hmacSHA512(VNP_SECRET_KEY, signData.toString());
-
-            // Debug logs - ghi đầy đủ thông tin
-            log.info("{}====== VNPay Callback Debug ======", prefix);
-            log.info("{}Order ID: {}", prefix, orderId);
-            log.info("{}All received params: {}", prefix, params);
-            log.info("{}Parameters for signing: {}", prefix, sortedParams);
-            log.info("{}Sign data: {}", prefix, signData);
-            log.info("{}Calculated hash: {}", prefix, calculatedHash);
-            log.info("{}Received hash: {}", prefix, secureHash);
-
-            // 6. Verify hash - so sánh chính xác
-            if (!calculatedHash.equalsIgnoreCase(secureHash)) {
-                log.error("{}Hash verification failed for order: {}", prefix, orderId);
-                log.error("{}Expected: {}", prefix, calculatedHash);
-                log.error("{}Received: {}", prefix, secureHash);
-
-                // Thêm cơ chế fallback - thử lại với cách sắp xếp khác nếu cần
-                String fallbackHash = tryAlternativeHashingMethods(params);
-                if (fallbackHash.equalsIgnoreCase(secureHash)) {
-                    log.warn("{}Hash matched using fallback method!", prefix);
-                } else {
-                    return buildErrorResponse(prefix + "Invalid VNPAY signature",
-                            HttpStatus.BAD_REQUEST,
-                            Map.of(
-                                    "RspCode", "97",
-                                    "DebugInfo", Map.of(
-                                            "SignMethod", "HMAC-SHA512",
-                                            "SignData", signData.toString(),
-                                            "ExpectedHash", calculatedHash,
-                                            "ReceivedHash", secureHash,
-                                            "FallbackHash", fallbackHash,
-                                            "SecretKey", maskSecretKey(VNP_SECRET_KEY)
-                                    )
-                            ));
-                }
+            if (List.of("CANCELLED", "EXPIRED", "PAID").contains(transaction.getStatus())) {
+                return buildErrorResponse("Transaction already processed",
+                        HttpStatus.BAD_REQUEST,
+                        Map.of("RspCode", "02", "CurrentStatus", transaction.getStatus()));
             }
 
-            // 7. Process transaction
-            Transaction transaction = transactionRepository.findByOrderId(orderId)
-                    .orElseThrow(() -> {
-                        log.error("{}Transaction not found: {}", prefix, orderId);
-                        return new RuntimeException(prefix + "Transaction not found");
-                    });
-
-            // 8. Check expiry
             if (isTransactionExpired(transaction)) {
+                log.warn("Transaction {} expired at {}", orderId, transaction.getExpiryTime());
                 transaction.setStatus("EXPIRED");
                 transactionRepository.save(transaction);
-                log.warn("{}Transaction expired: {}", prefix, orderId);
-                return buildErrorResponse(prefix + "Transaction expired",
+                return buildErrorResponse("Transaction expired",
                         HttpStatus.BAD_REQUEST,
                         Map.of("RspCode", "70"));
             }
 
-            // 9. Handle payment result
             if ("00".equals(responseCode)) {
-                return handleSuccessfulPayment(transaction, transactionId, isIPN);
+                return handleSuccessfulPayment(transaction, params.get("vnp_TransactionNo"), isIPN);
             } else {
                 return handleFailedPayment(transaction, responseCode, isIPN);
             }
 
         } catch (Exception e) {
-            log.error("{}Error processing callback for order {}: {}", prefix, orderId, e.getMessage(), e);
-            return buildErrorResponse(prefix + "Processing error: " + e.getMessage(),
+            return buildErrorResponse("Processing error: " + e.getMessage(),
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     Map.of("RspCode", "99"));
         }
     }
 
-// ========== HELPER METHODS ==========
+    @Scheduled(fixedRate = 60000)
+    @Transactional
+    public void processExpiredTransactions() {
+        List<Transaction> expiredTransactions = transactionRepository
+                .findByStatusAndExpiryTimeBefore("PENDING", LocalDateTime.now());
 
-    private String tryAlternativeHashingMethods(Map<String, String> params) {
-        // Thử các phương pháp hash thay thế nếu cần
-        try {
-            // Cách 1: Không sắp xếp tham số
-            StringBuilder rawSignData = new StringBuilder();
-            params.entrySet().stream()
-                    .filter(e -> e.getKey().startsWith("vnp_"))
-                    .filter(e -> !e.getKey().equalsIgnoreCase("vnp_SecureHash"))
-                    .forEach(e -> {
-                        if (rawSignData.length() > 0) rawSignData.append("&");
-                        rawSignData.append(e.getKey()).append("=").append(e.getValue());
-                    });
-            String hash1 = hmacSHA512(VNP_SECRET_KEY, rawSignData.toString());
-
-            // Cách 2: Sắp xếp theo thứ tự khác
-            Map<String, String> sortedParams = new TreeMap<>(params);
-            String sortedSignData = sortedParams.entrySet().stream()
-                    .filter(e -> e.getKey().startsWith("vnp_"))
-                    .filter(e -> !e.getKey().equalsIgnoreCase("vnp_SecureHash"))
-                    .map(e -> e.getKey() + "=" + e.getValue())
-                    .collect(Collectors.joining("&"));
-            String hash2 = hmacSHA512(VNP_SECRET_KEY, sortedSignData);
-
-            return hash2; // Ưu tiên trả về hash từ cách 2
-        } catch (Exception e) {
-            return "fallback-hash-error";
+        if (!expiredTransactions.isEmpty()) {
+            expiredTransactions.forEach(transaction -> {
+                log.warn("Marking transaction {} as EXPIRED (was pending since {})",
+                        transaction.getOrderId(), transaction.getExpiryTime());
+                transaction.setStatus("EXPIRED");
+            });
+            transactionRepository.saveAll(expiredTransactions);
         }
-    }
-
-    private String maskSecretKey(String key) {
-        if (key == null || key.length() < 8) return "****";
-        return key.substring(0, 2) + "****" + key.substring(key.length() - 2);
     }
 
     @Override
@@ -249,17 +168,13 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
             transaction.setStatus("CANCELLED");
             transactionRepository.save(transaction);
-
             return buildSuccessResponse("Transaction cancelled successfully", null);
 
         } catch (Exception e) {
-            log.error("Error cancelling transaction {}: {}", orderId, e.getMessage(), e);
             return buildErrorResponse("Error cancelling transaction: " + e.getMessage(),
                     HttpStatus.INTERNAL_SERVER_ERROR, null);
         }
     }
-
-    // ========== HELPER METHODS ==========
 
     private boolean isTransactionExpired(Transaction transaction) {
         return transaction.getExpiryTime() != null &&
@@ -268,39 +183,23 @@ public class TransactionServiceImpl implements PaymentUseCase {
     }
 
     private ResponseObject handleSuccessfulPayment(Transaction transaction, String transactionId, boolean isIPN) {
-        String prefix = isIPN ? "IPN: " : "";
-
         if (!"PAID".equals(transaction.getStatus())) {
             transaction.markAsPaid(transactionId);
             transactionRepository.save(transaction);
             eventPublisher.publishEvent(new TransactionCompletedEvent(transaction));
-            log.info("{}Payment processed for order: {}", prefix, transaction.getOrderId());
         }
-
-        return buildSuccessResponse(prefix + "Payment confirmed",
-                Map.of(
-                        "RspCode", "00",
-                        "TransactionId", transactionId,
-                        "Amount", transaction.getAmount(),
-                        "OrderId", transaction.getOrderId()
-                ));
+        return buildSuccessResponse("Payment confirmed",
+                Map.of("RspCode", "00", "TransactionId", transactionId));
     }
 
     private ResponseObject handleFailedPayment(Transaction transaction, String responseCode, boolean isIPN) {
-        String prefix = isIPN ? "IPN: " : "";
-
         if ("PENDING".equals(transaction.getStatus())) {
             transaction.setStatus("FAILED");
             transactionRepository.save(transaction);
-            log.warn("{}Payment failed for order: {}", prefix, transaction.getOrderId());
         }
-
-        return buildErrorResponse(prefix + "Payment failed with code: " + responseCode,
+        return buildErrorResponse("Payment failed with code: " + responseCode,
                 HttpStatus.BAD_REQUEST,
-                Map.of(
-                        "RspCode", "99",
-                        "VnpResponseCode", responseCode
-                ));
+                Map.of("RspCode", "99", "VnpResponseCode", responseCode));
     }
 
     private ResponseObject buildSuccessResponse(String message, Object data) {
@@ -320,23 +219,18 @@ public class TransactionServiceImpl implements PaymentUseCase {
     }
 
     private String hmacSHA512(String key, String data) throws Exception {
-        // 1. Chuyển key và data sang byte array với encoding UTF-8
-        byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-        byte[] dataBytes = data.getBytes(StandardCharsets.UTF_8);
-
-        // 2. Khởi tạo HMAC-SHA512
         Mac hmac = Mac.getInstance("HmacSHA512");
-        hmac.init(new SecretKeySpec(keyBytes, "HmacSHA512"));
-
-        // 3. Tính toán hash
-        byte[] hashBytes = hmac.doFinal(dataBytes);
-
-        // 4. Chuyển hash sang hex (viết thường)
+        hmac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA512"));
+        byte[] hashBytes = hmac.doFinal(data.getBytes(StandardCharsets.UTF_8));
         StringBuilder hexString = new StringBuilder();
         for (byte b : hashBytes) {
             hexString.append(String.format("%02x", b));
         }
-
         return hexString.toString();
+    }
+
+    private String maskSecretKey(String key) {
+        if (key == null || key.length() < 8) return "****";
+        return key.substring(0, 2) + "****" + key.substring(key.length() - 2);
     }
 }
