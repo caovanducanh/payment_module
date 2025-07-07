@@ -3,6 +3,7 @@ package com.example.payment.application.service;
 import com.example.payment.application.mapper.TransactionMapper;
 import com.example.payment.application.usecase.PaymentUseCase;
 import com.example.payment.domain.event.TransactionCompletedEvent;
+import com.example.payment.domain.event.TransactionCreatedEvent;
 import com.example.payment.domain.model.Transaction;
 import com.example.payment.domain.model.TransactionStatus;
 import com.example.payment.domain.model.PaymentGatewayType;
@@ -70,7 +71,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
         try {
             Transaction transaction = mapper.toDomain(request);
             transaction.setExpiryTime(LocalDateTime.now().plusMinutes(15));
-
+            eventPublisher.publishEvent(new TransactionCreatedEvent(transaction));
             PaymentResult paymentResult = gateway.initiatePayment(transaction);
             if (!paymentResult.isSuccess()) {
                 return buildErrorResponse(paymentResult.getMessage(), HttpStatus.BAD_REQUEST, null);
