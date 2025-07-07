@@ -5,6 +5,21 @@ A robust, production-ready payment microservice for handling payment transaction
 
 ---
 
+## Architecture Style
+
+**This module is designed following Clean Architecture principles, inspired by Domain-Driven Design (DDD):**
+- **Domain Layer:** Contains core business logic, entities, enums, and business rules. (e.g., `Transaction`, `TransactionStatus`, `PaymentGatewayType`)
+- **Application Layer:** Use cases, service orchestration, mapping, validation. (e.g., `TransactionServiceImpl`, `TransactionMapper`)
+- **Infrastructure Layer:** Persistence, external gateway integration, entity mapping. (e.g., `TransactionEntity`, repository, payment gateway client)
+- **Web/API Layer:** REST controllers, DTOs, request/response mapping. (e.g., `PaymentController`, `PaymentRequest`, `PaymentResponse`)
+
+**Benefits:**
+- Business logic is isolated, testable, and independent from frameworks.
+- Easy to extend, maintain, and plug into any Spring Boot project.
+- Follows best practices for separation of concerns, maintainability, and scalability.
+
+---
+
 ## Plug & Play Integration
 
 > **This module is designed for easy integration into any Spring Boot project.**
@@ -84,18 +99,18 @@ Sensitive values should be encrypted using Jasypt.
 ## Architecture
 
 ```mermaid
-graph TD;
-  A[Client] -->|REST: /api/payments/vnpay| B(PaymentController)
-  B -->|Validate & map| C(TransactionService)
-  C -->|Select gateway| D(PaymentGateway_VnPay)
-  D -->|Call API| E(VNPAY_Provider)
-  E -->|Redirect user| F[Client]
-  E -->|Callback (return/IPN)| G(PaymentController)
-  G -->|Update| C
-  C -->|Save| H(TransactionRepository)
-  C -->|Log| I(AuditLogger)
-  I -->|Log| J(ELK_Log_Management)
-  C -->|Expose| K(Actuator/Prometheus)
+graph TD
+  A[Client] -->|REST API| B(PaymentController)
+  B -->|Validate| C(TransactionService)
+  C -->|SelectGateway| D(PaymentGateway_VnPay)
+  D -->|CallAPI| E(VNPAY_Provider)
+  E -->|Redirect| A
+  E -->|Callback| F(PaymentController)
+  F -->|Update| C
+  C -->|Save| G(TransactionRepository)
+  C -->|Log| H(AuditLogger)
+  H -->|Log| I(ELK_Log_Management)
+  C -->|Metrics| J(Actuator_Prometheus)
 ```
 
 ### **Flow Explanation**
@@ -104,7 +119,7 @@ graph TD;
 3. **TransactionService** chọn gateway phù hợp (ví dụ: VnPay), gọi **PaymentGateway_VnPay**.
 4. **PaymentGateway_VnPay** gọi API provider thực tế (**VNPAY_Provider**).
 5. **VNPAY_Provider** trả về URL, redirect user sang trang thanh toán.
-6. Sau khi thanh toán, **VNPAY_Provider** gọi callback (return/IPN) về **PaymentController**.
+6. Sau khi thanh toán, **VNPAY_Provider** gọi callback về **PaymentController**.
 7. **PaymentController** gọi lại **TransactionService** để update trạng thái giao dịch.
 8. **TransactionService** lưu trạng thái mới vào **TransactionRepository** (DB).
 9. Ghi log nghiệp vụ qua **AuditLogger** (đẩy về ELK nếu có).
