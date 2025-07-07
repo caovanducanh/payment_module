@@ -85,13 +85,30 @@ Sensitive values should be encrypted using Jasypt.
 
 ```mermaid
 graph TD;
-  A[Client] -->|REST| B(PaymentController)
-  B --> C(TransactionService)
-  C --> D(PaymentGateway_VnPay)
-  C --> E(TransactionRepository)
-  C --> F(AuditLogger)
-  F -.->|Log| G(ELK_Log_Management)
+  A[Client] -->|REST: /api/payments/vnpay| B(PaymentController)
+  B -->|Validate & map| C(TransactionService)
+  C -->|Select gateway| D(PaymentGateway_VnPay)
+  D -->|Call API| E(VNPAY_Provider)
+  E -->|Redirect user| F[Client]
+  E -->|Callback (return/IPN)| G(PaymentController)
+  G -->|Update| C
+  C -->|Save| H(TransactionRepository)
+  C -->|Log| I(AuditLogger)
+  I -->|Log| J(ELK_Log_Management)
+  C -->|Expose| K(Actuator/Prometheus)
 ```
+
+### **Flow Explanation**
+1. **Client** gửi yêu cầu thanh toán (REST API) đến **PaymentController**.
+2. **PaymentController** validate, map request sang domain, gọi **TransactionService**.
+3. **TransactionService** chọn gateway phù hợp (ví dụ: VnPay), gọi **PaymentGateway_VnPay**.
+4. **PaymentGateway_VnPay** gọi API provider thực tế (**VNPAY_Provider**).
+5. **VNPAY_Provider** trả về URL, redirect user sang trang thanh toán.
+6. Sau khi thanh toán, **VNPAY_Provider** gọi callback (return/IPN) về **PaymentController**.
+7. **PaymentController** gọi lại **TransactionService** để update trạng thái giao dịch.
+8. **TransactionService** lưu trạng thái mới vào **TransactionRepository** (DB).
+9. Ghi log nghiệp vụ qua **AuditLogger** (đẩy về ELK nếu có).
+10. Expose health/metrics qua **Actuator/Prometheus** để monitoring.
 
 ---
 
