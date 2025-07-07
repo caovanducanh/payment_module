@@ -87,10 +87,10 @@ Sensitive values should be encrypted using Jasypt.
 graph TD;
   A[Client] -->|REST| B(PaymentController)
   B --> C(TransactionService)
-  C --> D[PaymentGateway (VnPay, ...)]
-  C --> E[TransactionRepository]
-  C --> F[AuditLogger]
-  F -.->|Log| G[ELK/Log Management]
+  C --> D(PaymentGateway_VnPay)
+  C --> E(TransactionRepository)
+  C --> F(AuditLogger)
+  F -.->|Log| G(ELK_Log_Management)
 ```
 
 ---
