@@ -5,6 +5,8 @@ import com.example.payment.infrastructure.entity.TransactionEntity;
 import com.example.payment.web.dto.request.PaymentRequest;
 import com.example.payment.web.dto.response.PaymentResponse;
 import org.springframework.stereotype.Component;
+import com.example.payment.domain.model.TransactionStatus;
+import com.example.payment.domain.model.PaymentGatewayType;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -16,8 +18,8 @@ public class TransactionMapper {
         return new Transaction(
                 request.getOrderId(),
                 request.getAmount(),
-                "PENDING",
-                request.getProvider(),
+                TransactionStatus.PENDING,
+                PaymentGatewayType.valueOf(request.getProvider()),
                 null // transactionId chưa có
         );
     }
@@ -34,13 +36,13 @@ public class TransactionMapper {
         return entity;
     }
 
-    public Transaction toDomain(TransactionEntity entity) {
+    public static Transaction toDomain(TransactionEntity entity) {
         Transaction domain = new Transaction(
-                entity.getOrderId(),
-                entity.getAmount(),
-                entity.getStatus(),
-                entity.getProvider(),
-                entity.getTransactionId()
+            entity.getOrderId(),
+            entity.getAmount(),
+            entity.getStatus(),
+            entity.getProvider(),
+            entity.getTransactionId()
         );
         domain.setRedirectUrl(entity.getRedirectUrl());
         domain.setExpiryTime(entity.getExpiryTime());
@@ -57,8 +59,8 @@ public class TransactionMapper {
         response.setRedirectUrl(transaction.getRedirectUrl());
         return response;
     }
-    public List<TransactionEntity> toEntities(Iterable<Transaction> domains) {
-        return ((List<Transaction>) domains).stream()
+    public List<TransactionEntity> toEntities(List<Transaction> domains) {
+        return domains.stream()
                 .map(this::toEntity)
                 .collect(Collectors.toList());
     }
@@ -66,7 +68,7 @@ public class TransactionMapper {
     // Thêm phương thức mới để chuyển đổi danh sách
     public List<Transaction> toDomains(List<TransactionEntity> entities) {
         return entities.stream()
-                .map(this::toDomain)
+                .map(entity -> TransactionMapper.toDomain(entity))
                 .collect(Collectors.toList());
     }
 }

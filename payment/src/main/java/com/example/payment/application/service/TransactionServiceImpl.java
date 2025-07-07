@@ -4,7 +4,9 @@ import com.example.payment.application.mapper.TransactionMapper;
 import com.example.payment.application.usecase.PaymentUseCase;
 import com.example.payment.domain.event.TransactionCompletedEvent;
 import com.example.payment.domain.model.Transaction;
-import com.example.payment.domain.port.TransactionGateway;
+import com.example.payment.domain.model.TransactionStatus;
+import com.example.payment.domain.model.PaymentGatewayType;
+import com.example.payment.domain.port.PaymentGateway;
 import com.example.payment.domain.port.TransactionRepository;
 import com.example.payment.web.dto.request.PaymentRequest;
 import com.example.payment.web.dto.response.PaymentResponse;
@@ -25,23 +27,24 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import com.example.payment.domain.model.PaymentResult;
 
 @Slf4j
 @Service
 public class TransactionServiceImpl implements PaymentUseCase {
 
-    private final Map<String, TransactionGateway> gatewayMap;
+    private final Map<PaymentGatewayType, PaymentGateway> gatewayMap;
     private final TransactionMapper mapper;
     private final TransactionRepository transactionRepository;
     private final ApplicationEventPublisher eventPublisher;
     private static final String VNP_SECRET_KEY = "T81UQ58X7Q54PYBVEO6FJ4AKQSUAP1S2";
 
-    public TransactionServiceImpl(List<TransactionGateway> gateways,
+    public TransactionServiceImpl(List<PaymentGateway> gateways,
                                   TransactionMapper mapper,
                                   TransactionRepository transactionRepository,
                                   ApplicationEventPublisher eventPublisher) {
         this.gatewayMap = gateways.stream()
-                .collect(Collectors.toMap(TransactionGateway::provider, g -> g));
+                .collect(Collectors.toMap(PaymentGateway::getType, g -> g));
         this.mapper = mapper;
         this.transactionRepository = transactionRepository;
         this.eventPublisher = eventPublisher;
@@ -58,7 +61,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
                     }
                 });
 
-        TransactionGateway gateway = gatewayMap.get(request.getProvider());
+        PaymentGateway gateway = gatewayMap.get(PaymentGatewayType.valueOf(request.getProvider()));
         if (gateway == null) {
             return buildErrorResponse("Unsupported provider: " + request.getProvider(),
                     HttpStatus.BAD_REQUEST, null);
@@ -68,10 +71,14 @@ public class TransactionServiceImpl implements PaymentUseCase {
             Transaction transaction = mapper.toDomain(request);
             transaction.setExpiryTime(LocalDateTime.now().plusMinutes(15));
 
-            Transaction result = gateway.execute(transaction);
-            Transaction saved = transactionRepository.save(result);
+            PaymentResult paymentResult = gateway.initiatePayment(transaction);
+            if (!paymentResult.isSuccess()) {
+                return buildErrorResponse(paymentResult.getMessage(), HttpStatus.BAD_REQUEST, null);
+            }
+            transaction.setStatus(paymentResult.getStatus());
+            transaction.setTransactionId(paymentResult.getTransactionId());
+            Transaction saved = transactionRepository.save(transaction);
             eventPublisher.publishEvent(new TransactionCompletedEvent(saved));
-
             return buildSuccessResponse("Payment URL created successfully", mapper.toResponse(saved));
 
         } catch (Exception e) {
@@ -110,7 +117,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
             Transaction transaction = transactionRepository.findByOrderId(orderId)
                     .orElseThrow(() -> new RuntimeException("Transaction not found"));
 
-            if (List.of("CANCELLED", "EXPIRED", "PAID").contains(transaction.getStatus())) {
+            if (List.of(TransactionStatus.CANCELLED, TransactionStatus.EXPIRED, TransactionStatus.PAID).contains(transaction.getStatus())) {
                 return buildErrorResponse("Transaction already processed",
                         HttpStatus.BAD_REQUEST,
                         Map.of("RspCode", "02", "CurrentStatus", transaction.getStatus()));
@@ -118,7 +125,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
             if (isTransactionExpired(transaction)) {
                 log.warn("Transaction {} expired at {}", orderId, transaction.getExpiryTime());
-                transaction.setStatus("EXPIRED");
+                transaction.setStatus(TransactionStatus.EXPIRED);
                 transactionRepository.save(transaction);
                 return buildErrorResponse("Transaction expired",
                         HttpStatus.BAD_REQUEST,
@@ -151,7 +158,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
             expiredTransactions.forEach(transaction -> {
                 log.warn("Marking transaction {} as EXPIRED (was pending since {})",
                         transaction.getOrderId(), transaction.getExpiryTime());
-                transaction.setStatus("EXPIRED");
+                transaction.setStatus(TransactionStatus.EXPIRED);
             });
             List<Transaction> saved = transactionRepository.saveAll(expiredTransactions);
             log.info("Successfully updated {} transactions to EXPIRED", saved.size());
@@ -165,12 +172,12 @@ public class TransactionServiceImpl implements PaymentUseCase {
             Transaction transaction = transactionRepository.findByOrderId(orderId)
                     .orElseThrow(() -> new RuntimeException("Transaction not found"));
 
-            if (!List.of("PENDING", "FAILED", "EXPIRED").contains(transaction.getStatus())) {
+            if (!List.of(TransactionStatus.PENDING, TransactionStatus.FAILED, TransactionStatus.EXPIRED).contains(transaction.getStatus())) {
                 return buildErrorResponse("Only PENDING, FAILED or EXPIRED transactions can be cancelled",
                         HttpStatus.BAD_REQUEST, null);
             }
 
-            transaction.setStatus("CANCELLED");
+            transaction.setStatus(TransactionStatus.CANCELLED);
             transactionRepository.save(transaction);
             return buildSuccessResponse("Transaction cancelled successfully", null);
 
@@ -198,7 +205,7 @@ public class TransactionServiceImpl implements PaymentUseCase {
 
     private ResponseObject handleFailedPayment(Transaction transaction, String responseCode, boolean isIPN) {
         if ("PENDING".equals(transaction.getStatus())) {
-            transaction.setStatus("FAILED");
+            transaction.setStatus(TransactionStatus.FAILED);
             transactionRepository.save(transaction);
         }
         return buildErrorResponse("Payment failed with code: " + responseCode,

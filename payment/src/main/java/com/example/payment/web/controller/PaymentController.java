@@ -9,6 +9,7 @@ import lombok.AllArgsConstructor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import jakarta.validation.Valid;
 
 import java.util.Map;
 
@@ -21,7 +22,7 @@ public class PaymentController {
 
 
     @PostMapping
-    public ResponseEntity<ResponseObject> createPayment(@RequestBody PaymentRequest request) {
+    public ResponseEntity<ResponseObject> createPayment(@RequestBody @Valid PaymentRequest request) {
         return ResponseEntity.ok(paymentService.handle(request));
     }
 
